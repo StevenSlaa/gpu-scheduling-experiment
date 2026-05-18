@@ -1,0 +1,22 @@
+scenario:
+  name: low_demand
+  type: low
+  users: 8
+  submission_window_seconds: 300
+  random_seed: 84
+
+  job_mix:
+    short_ratio: 0.9
+    long_ratio: 0.1
+
+  short_jobs:
+    duration_seconds_min: 30
+    duration_seconds_max: 120
+    memory_gb_min: 4
+    memory_gb_max: 10
+
+  long_jobs:
+    duration_seconds_min: 240
+    duration_seconds_max: 420
+    memory_gb_min: 16
+    memory_gb_max: 32

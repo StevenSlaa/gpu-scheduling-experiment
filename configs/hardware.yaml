@@ -1,0 +1,14 @@
+hardware:
+  gpus:
+    - id: gpu0
+      device: cuda:0
+      memory_gb: 96
+    - id: gpu1
+      device: cuda:1
+      memory_gb: 96
+
+  mig:
+    enabled: true
+    partitions_per_gpu: 4
+    partition_memory_gb: 24
+    total_partitions: 8

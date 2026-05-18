@@ -1,0 +1,22 @@
+scenario:
+  name: local_a2000_smoke
+  type: local_smoke
+  users: 4
+  submission_window_seconds: 20
+  random_seed: 42
+
+  job_mix:
+    short_ratio: 1.0
+    long_ratio: 0.0
+
+  short_jobs:
+    duration_seconds_min: 20
+    duration_seconds_max: 45
+    memory_gb_min: 2
+    memory_gb_max: 4
+
+  long_jobs:
+    duration_seconds_min: 60
+    duration_seconds_max: 120
+    memory_gb_min: 4
+    memory_gb_max: 6

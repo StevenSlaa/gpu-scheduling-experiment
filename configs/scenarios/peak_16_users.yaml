@@ -1,0 +1,22 @@
+scenario:
+  name: peak_16_users
+  type: peak
+  users: 16
+  submission_window_seconds: 120
+  random_seed: 42
+
+  job_mix:
+    short_ratio: 0.8
+    long_ratio: 0.2
+
+  short_jobs:
+    duration_seconds_min: 30
+    duration_seconds_max: 180
+    memory_gb_min: 4
+    memory_gb_max: 12
+
+  long_jobs:
+    duration_seconds_min: 300
+    duration_seconds_max: 600
+    memory_gb_min: 24
+    memory_gb_max: 48

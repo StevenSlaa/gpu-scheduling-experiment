@@ -1,0 +1,11 @@
+strategy:
+  name: reservation
+  type: reserved_capacity
+  reserved_pool:
+    group: lab
+    devices:
+      - cuda:0
+  general_pool:
+    devices:
+      - cuda:1
+  allow_general_to_use_reserved_when_idle: false

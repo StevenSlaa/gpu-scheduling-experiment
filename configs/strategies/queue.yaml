@@ -1,0 +1,7 @@
+strategy:
+  name: queue
+  type: exclusive_gpu_fifo
+  devices:
+    - cuda:0
+    - cuda:1
+  preemption: false

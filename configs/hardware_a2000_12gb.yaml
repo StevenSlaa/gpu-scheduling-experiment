@@ -1,0 +1,11 @@
+hardware:
+  gpus:
+    - id: gpu0
+      device: cuda:0
+      memory_gb: 12
+
+  mig:
+    enabled: false
+    partitions_per_gpu: 0
+    partition_memory_gb: 0
+    total_partitions: 0

@@ -15,6 +15,11 @@ NVIDIA_SMI_QUERY = [
     "--format=csv,noheader,nounits",
 ]
 
+# Hardware MIG profile 1g.24gb gives 4 instances per RTX PRO 6000 GPU.
+# utilization.gpu reports [N/A] in MIG mode, so we substitute slot-occupancy
+# (active compute processes ÷ total MIG slots × 100).
+MIG_SLOTS_PER_GPU = 4
+
 
 class GpuMonitor:
     def __init__(self, output_path: str | Path, interval_seconds: float = 1.0) -> None:
@@ -83,6 +88,10 @@ def sample_gpu_metrics() -> list[dict[str, str]]:
         if len(parts) != 7:
             continue
         _, index, util, memory_used, memory_total, power, temperature = parts
+        # MIG-mode GPUs return [N/A] for utilization.gpu.
+        # Substitute slot-occupancy: active compute processes / MIG slots * 100.
+        if util == "[N/A]":
+            util = str(_mig_slot_occupancy(int(index)))
         rows.append(
             {
                 "timestamp": utc_now_iso(),
@@ -95,3 +104,26 @@ def sample_gpu_metrics() -> list[dict[str, str]]:
             }
         )
     return rows
+
+
+def _mig_slot_occupancy(gpu_index: int, slots: int = MIG_SLOTS_PER_GPU) -> float:
+    """
+    Count active CUDA processes on a MIG-mode physical GPU (each process occupies
+    exactly one MIG instance) and return occupancy as 0–100 %.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi", "-i", str(gpu_index),
+                "--query-compute-apps=pid",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return 0.0
+    active = sum(1 for line in result.stdout.splitlines() if line.strip())
+    return min(round(active / slots * 100, 1), 100.0)

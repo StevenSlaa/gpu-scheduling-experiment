@@ -5,7 +5,7 @@ import csv
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -81,25 +81,23 @@ class ExperimentTui(App):
     .ctrl-title {
         text-style: bold;
         color: #58a6ff;
-        padding: 1 0 0 0;
+        margin-top: 1;
     }
 
-    Select, Input { margin-bottom: 1; }
+    Select { margin-bottom: 1; }
 
-    .switch-row {
-        height: 3;
-        margin-bottom: 1;
-        align: left middle;
-    }
-    .switch-label {
-        padding: 0 1;
-        color: #8b949e;
-    }
+    /* labelled input rows */
+    .opt-row   { height: 3; margin-bottom: 0; }
+    .opt-lbl   { width: 14; padding: 1 1 0 0; color: #8b949e; }
+    .opt-inp   { width: 1fr; }
+
+    /* dry-run row reuses opt-row */
+    .dr-lbl    { padding: 1 1 0 0; color: #8b949e; }
 
     Button { width: 100%; margin-bottom: 1; }
 
     /* ── top panels ──────────────────────────────────── */
-    #top-panels { height: 14; }
+    #top-panels { height: 11; }
 
     #status {
         width: 1fr;
@@ -167,12 +165,18 @@ class ExperimentTui(App):
                     yield Select(options=self.config_options("scenarios"),  id="scenario", prompt="Select scenario")
                     yield Rule()
                     yield Label("RUN OPTIONS", classes="ctrl-title")
-                    yield Input(value="1",   placeholder="Run index",            id="run-index")
-                    yield Input(value="1.0", placeholder="Time scale",           id="time-scale")
-                    yield Input(value="1.0", placeholder="Metrics interval (s)", id="metrics-interval")
-                    with Horizontal(classes="switch-row"):
+                    with Horizontal(classes="opt-row"):
+                        yield Label("Run index",   classes="opt-lbl")
+                        yield Input(value="1",   id="run-index",       classes="opt-inp")
+                    with Horizontal(classes="opt-row"):
+                        yield Label("Time scale",  classes="opt-lbl")
+                        yield Input(value="1.0", id="time-scale",      classes="opt-inp")
+                    with Horizontal(classes="opt-row"):
+                        yield Label("Interval (s)", classes="opt-lbl")
+                        yield Input(value="1.0", id="metrics-interval", classes="opt-inp")
+                    with Horizontal(classes="opt-row"):
+                        yield Label("Dry run",     classes="dr-lbl")
                         yield Switch(value=False, id="dry-run")
-                        yield Label("Dry run", classes="switch-label")
                     yield Rule()
                     yield Button("▶  Run Experiment",  id="run",      variant="success")
                     yield Button("   Validate Env",    id="validate", variant="primary")
@@ -379,10 +383,24 @@ class ExperimentTui(App):
         self._update_jobs_table()
 
     def _show_idle(self) -> None:
+        hw = self._sel_stem("hardware")
+        st = self._sel_stem("strategy")
+        sc = self._sel_stem("scenario")
+        ri = self._val("run-index", "1")
+        ts = self._val("time-scale", "1.0")
+        iv = self._val("metrics-interval", "1.0")
+        dr = "yes" if self.query_one("#dry-run", Switch).value else "no"
         self.query_one("#status", Static).update(
-            f"\n [{_DIM}]No active experiment.[/]\n\n"
-            f" Configure a run on the left and press [bold]▶ Run Experiment[/bold],\n"
-            f" or press [bold]r[/bold] to load the latest completed result."
+            f"\n [{_DIM}]No active experiment — ready to run.[/]\n\n"
+            f"  [dim]Hardware[/]   [bold]{hw}[/]\n"
+            f"  [dim]Strategy[/]   [bold]{st}[/]\n"
+            f"  [dim]Scenario[/]   [bold]{sc}[/]\n\n"
+            f"  [dim]Run index[/]  {ri}   "
+            f"[dim]Time scale[/]  {ts}   "
+            f"[dim]Interval[/]  {iv} s   "
+            f"[dim]Dry run[/]  [{_WARN if dr == 'yes' else _DIM}]{dr}[/]\n\n"
+            f"  Press [bold]▶ Run Experiment[/bold] to start,"
+            f" or [bold]r[/bold] to load a previous result."
         )
         self.query_one("#gpu", Static).update(f"\n [{_DIM}]GPU metrics unavailable.[/]")
 
@@ -392,7 +410,6 @@ class ExperimentTui(App):
             return
         meta  = _rjson(d / "metadata.json")
         summ  = _rjson(d / "summary.json")
-        qrows = _rcsv(d / "queue_depth.csv")
         jrows = _rcsv(d / "jobs.csv")
         gpus  = _last_gpu_per_device(d / "gpu_metrics.csv")
 
@@ -407,50 +424,89 @@ class ExperimentTui(App):
         run_idx  = meta.get("run_index", "?")
         started  = meta.get("started_at", "")
         ended    = meta.get("ended_at")
+        is_live  = bool(self.process and self.process.returncode is None)
 
-        is_live = self.process and self.process.returncode is None
         state_tag = (f"[{_WARN}]● RUNNING[/]" if is_live
                      else f"[{_OK}]✓ DONE[/]"  if ended
                      else f"[{_DIM}]○ idle[/]")
 
-        prog_pct = done / total * 100 if total else 0
-        prog_bar = _bar(prog_pct, 22)
+        # ── three-colour progress bar: green=done  yellow=running  grey=waiting ──
+        N = 22
+        done_f = int(N * done / total) if total else 0
+        run_f  = min(int(N * counts["running"] / total) if total else 0, N - done_f)
+        prog_bar = (f"[{_OK}]{'█' * done_f}[/]"
+                    f"[{_WARN}]{'▓' * run_f}[/]"
+                    f"[{_DIM}]{'░' * (N - done_f - run_f)}[/]")
+        pct = int((done + counts["running"]) / total * 100) if total else 0
 
-        qt    = qrows[-1] if qrows else {}
-        q_dep = qt.get("queue_depth", "?")
-        q_run = qt.get("running_jobs", "?")
+        # ── ETA / end-time ──────────────────────────────────────────────────────
+        esecs = _elapsed_secs(started)
+        if is_live and done > 0 and total > done:
+            rem = max(0, int(esecs * (total - done) / done))
+            h, r = divmod(rem, 3600)
+            m, s = divmod(r, 60)
+            try:
+                s_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                eta_clock = (s_dt + timedelta(seconds=esecs + rem)).strftime("%H:%M:%S")
+            except Exception:
+                eta_clock = "?"
+            timing_line = (f"  [{_DIM}]ETA[/]   [{_WARN}]~{h:02d}:{m:02d}:{s:02d} remaining[/]"
+                           f"  [dim]·[/]  done ≈ [bold]{eta_clock}[/]")
+        elif is_live:
+            timing_line = f"  [{_DIM}]ETA[/]   [{_DIM}]calculating…[/]"
+        else:
+            timing_line = f"  [{_DIM}]Ended[/]  [bold]{_ts(ended)}[/]" if ended else ""
 
-        med_w = summ.get("median_wait")
-        p95_w = summ.get("p95_wait")
-        t_exc = summ.get("t_wait_exceeded_count")
-        t_pct = summ.get("t_wait_exceeded_pct")
+        # ── currently running jobs ───────────────────────────────────────────────
+        running_rows = [r for r in jrows if r.get("status") == "running"]
+        if running_rows:
+            parts = [
+                f"[bold]{r['job_id']}[/] [{_DIM}]{r['job_type']} {r['requested_memory_gb']}GB[/]"
+                f" [dim]→[/] [{_ACC}]{r.get('assigned_device', '?')}[/]"
+                for r in running_rows[:3]
+            ]
+            extra = f" [{_DIM}]+{len(running_rows)-3} more[/]" if len(running_rows) > 3 else ""
+            lbl   = "Now" if len(running_rows) == 1 else f"Now ×{len(running_rows)}"
+            now_line = f"  [{_DIM}]{lbl}[/]  {'  [dim]·[/]  '.join(parts)}{extra}"
+        elif done == total and total > 0:
+            now_line = f"  [{_OK}]All {total} jobs finished.[/]"
+        else:
+            now_line = ""
+
+        # ── wait stats ───────────────────────────────────────────────────────────
+        med_w  = summ.get("median_wait")
+        p95_w  = summ.get("p95_wait")
+        t_exc  = summ.get("t_wait_exceeded_count")
+        t_pct  = summ.get("t_wait_exceeded_pct")
         t_adeq = summ.get("t_wait_adequate")
-
-        lines = [
-            f" [{_ACC}]◆ {strategy}[/]  [dim]›[/]  [bold]{scenario}[/]  [dim]›[/]  run {run_idx}",
-            "",
-            f"  [dim]Started[/]  {_ts(started)}   [dim]Elapsed[/]  [bold]{_elapsed(started)}[/]   {state_tag}",
-            "",
-            f"  Jobs   {prog_bar}  [bold]{done}[/][dim]/{total}[/]",
-            f"         [{_OK}]✓ {done}[/]  [{_WARN}]● {counts['running']}[/]  "
-            f"[{_ERR}]✗ {failed}[/]  [{_MAG}]⊘ {reject}[/]  "
-            f"[{_DIM}]queue {q_dep}  active {q_run}[/]",
-        ]
-
+        wait_lines: list[str] = []
         if med_w is not None:
             mf = float(med_w)
             pf = float(p95_w) if p95_w is not None else None
             mc = _OK if mf < T_WAIT_SECONDS else _ERR
             pc = _OK if (pf or 0) < T_WAIT_SECONDS else _WARN
             pstr = f"{pf:.1f}" if pf is not None else "─"
-            wait_line = (f"  [dim]Wait[/]   median [{mc}]{mf:.1f} s[/]  "
-                         f"[dim]·[/]  p95 [{pc}]{pstr} s[/]")
-            lines += ["", wait_line]
+            wait_lines.append(
+                f"  [{_DIM}]Wait[/]  median [{mc}]{mf:.1f} s[/]  [dim]·[/]  p95 [{pc}]{pstr} s[/]"
+            )
             if t_exc is not None:
-                ec = _OK if t_exc == 0 else _WARN if t_exc < 3 else _ERR
-                adeq = (f"[{_OK}]✓ adequate[/]" if t_adeq
-                        else f"[{_ERR}]⚠ exceeds T_wait ({T_WAIT_SECONDS} s)[/]")
-                lines.append(f"         T_wait  [{ec}]{t_exc} jobs ({t_pct:.1f}%)[/]  {adeq}")
+                ec   = _OK if t_exc == 0 else _WARN if t_exc < 3 else _ERR
+                adeq = f"[{_OK}]✓ within T_wait[/]" if t_adeq else f"[{_ERR}]⚠ exceeds {T_WAIT_SECONDS} s[/]"
+                wait_lines.append(
+                    f"        T_wait exceeded  [{ec}]{t_exc} ({t_pct:.1f}%)[/]  {adeq}"
+                )
+
+        lines = [
+            f" [{_ACC}]◆ {strategy}[/]  [dim]›[/]  [bold]{scenario}[/]  [dim]›[/]  run {run_idx}",
+            f"  [{_DIM}]Started[/]  {_ts(started)}   [{_DIM}]Elapsed[/]  [bold]{_elapsed(started)}[/]   {state_tag}",
+            timing_line,
+            "",
+            f"  {prog_bar}  [bold]{done}[/][dim]/{total}[/]  [{_DIM}]{pct}%[/]   "
+            f"[{_OK}]✓{done}[/] [{_WARN}]●{counts['running']}[/] "
+            f"[{_ERR}]✗{failed}[/] [{_MAG}]⊘{reject}[/] [{_DIM}]○{counts['queued']}[/]",
+            now_line,
+            *wait_lines,
+        ]
 
         self.query_one("#status", Static).update("\n".join(lines))
         self._update_gpu(gpus)
@@ -459,27 +515,40 @@ class ExperimentTui(App):
         if not gpus:
             self.query_one("#gpu", Static).update(f"\n [{_DIM}]No GPU data yet.[/]")
             return
-        lines: list[str] = [f" [{_DIM}]GPU Metrics[/]"]
+        lines: list[str] = [f" [{_DIM}]GPU Metrics[/]", ""]
+        total_pwr  = 0.0
+        active_cnt = 0
         for device in sorted(gpus):
-            row   = gpus[device]
-            util  = _pf(row.get("gpu_util_percent"))
-            mem_u = _pf(row.get("memory_used_mb"))
-            mem_t = _pf(row.get("memory_total_mb"))
-            pwr   = row.get("power_watts",    "?")
-            temp  = row.get("temperature_c",  "?")
-            temp_f = _pf(temp)
-            temp_c = (_ERR if (temp_f or 0) > 80
-                      else _WARN if (temp_f or 0) > 65
-                      else _OK)
+            row    = gpus[device]
+            util   = _pf(row.get("gpu_util_percent"))
+            mem_u  = _pf(row.get("memory_used_mb"))
+            mem_t  = _pf(row.get("memory_total_mb"))
+            pwr_f  = _pf(row.get("power_watts"))
+            temp_f = _pf(row.get("temperature_c"))
+            temp_c = (_ERR if (temp_f or 0) > 80 else _WARN if (temp_f or 0) > 65 else _OK)
             mem_pct = (mem_u / mem_t * 100) if mem_u and mem_t else None
             gu = f"{mem_u/1024:.0f}" if mem_u else "?"
             gt = f"{mem_t/1024:.0f}" if mem_t else "?"
-            lines += [
-                "",
-                f" [bold]{device}[/]  [{temp_c}]{temp}°C[/]  [{_DIM}]{pwr} W[/]",
-                f"  Util  {_bar(util, 18)}  [{_uc(util)}]{_ps(util)}[/]",
-                f"  VRAM  {_bar(mem_pct, 18)}  [{_DIM}]{gu}/{gt} GB[/]",
-            ]
+            pwr_s = f"{pwr_f:.0f}W" if pwr_f else "?W"
+            temp_s = f"{temp_f:.0f}°" if temp_f else "?°"
+            if pwr_f:
+                total_pwr += pwr_f
+            if (util or 0) > 1:
+                active_cnt += 1
+            # one compact line per GPU
+            lines.append(
+                f" [{_ACC}]{device}[/]  [{temp_c}]{temp_s}[/]  [{_DIM}]{pwr_s}[/]  "
+                f"{_bar(util, 9)} [{_uc(util)}]{util:.0f}%[/]  "
+                f"{_bar(mem_pct, 9)} [{_DIM}]{gu}/{gt}GB[/]"
+                if util is not None else
+                f" [{_ACC}]{device}[/]  [{temp_c}]{temp_s}[/]  [{_DIM}]{pwr_s}[/]  "
+                f"{_bar(None, 9)} [dim]n/a[/]  "
+                f"{_bar(mem_pct, 9)} [{_DIM}]{gu}/{gt}GB[/]"
+            )
+        lines += [
+            "",
+            f" [{_DIM}]Total  {total_pwr:.0f} W   {active_cnt}/{len(gpus)} GPU{'s' if len(gpus)!=1 else ''} active[/]",
+        ]
         self.query_one("#gpu", Static).update("\n".join(lines))
 
     def _update_events(self) -> None:
@@ -559,6 +628,12 @@ class ExperimentTui(App):
     def _path(self, wid: str) -> str:
         return str(ROOT / str(self.query_one(f"#{wid}", Select).value))
 
+    def _sel_stem(self, wid: str) -> str:
+        try:
+            return Path(str(self.query_one(f"#{wid}", Select).value)).stem
+        except Exception:
+            return "?"
+
     def _val(self, wid: str, default: str) -> str:
         v = self.query_one(f"#{wid}", Input).value.strip()
         return v or default
@@ -595,6 +670,16 @@ def _ts(ts: str) -> str:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return ts
+
+def _elapsed_secs(started_at: str) -> int:
+    if not started_at:
+        return 0
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        return max(0, int((datetime.now(tz=start.tzinfo) - start).total_seconds()))
+    except Exception:
+        return 0
+
 
 def _elapsed(started_at: str) -> str:
     if not started_at:

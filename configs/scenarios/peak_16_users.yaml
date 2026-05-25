@@ -3,11 +3,11 @@ scenario:
   type: peak
   users: 16
   submission_window_seconds: 120
+  lambda_rate: 0.13  # jobs per second (≈ users / window); drives Poisson arrival process
   random_seed: 42
 
   job_mix:
-    short_ratio: 0.8
-    long_ratio: 0.2
+    short_ratio: 0.8  # α in the experimental design document; long_ratio = 1 - α
 
   short_jobs:
     duration_seconds_min: 30
@@ -18,5 +18,6 @@ scenario:
   long_jobs:
     duration_seconds_min: 300
     duration_seconds_max: 600
-    memory_gb_min: 24
-    memory_gb_max: 48
+    memory_gb_min: 16
+    # capped at MIG partition size (24 GB) so all strategies run the same jobs without rejection
+    memory_gb_max: 24

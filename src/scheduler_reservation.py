@@ -26,9 +26,21 @@ class ReservationScheduler:
 
     @asynccontextmanager
     async def acquire(self, job: JobSpec) -> AsyncIterator[Assignment]:
-        pool = self._reserved if job.group == self.reserved_group else self._general
-        device = await pool.get()
+        if job.group == self.reserved_group:
+            device = await self._reserved.get()
+            source = self._reserved
+        elif self.allow_borrow:
+            # Try general pool first; fall back to reserved pool when general is idle
+            try:
+                device = self._general.get_nowait()
+                source = self._general
+            except asyncio.QueueEmpty:
+                device = await self._reserved.get()
+                source = self._reserved
+        else:
+            device = await self._general.get()
+            source = self._general
         try:
             yield Assignment(device=device)
         finally:
-            pool.put_nowait(device)
+            source.put_nowait(device)

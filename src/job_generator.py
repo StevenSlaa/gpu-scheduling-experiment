@@ -21,9 +21,18 @@ def generate_jobs(scenario: dict) -> list[JobSpec]:
     rng = random.Random(scenario["random_seed"])
     users = int(scenario["users"])
     window = int(scenario["submission_window_seconds"])
+    lambda_rate = float(scenario.get("lambda_rate", users / window))
     short_ratio = float(scenario["job_mix"]["short_ratio"])
-    jobs: list[JobSpec] = []
+    assert 0 < short_ratio < 1, f"short_ratio must be in (0, 1), got {short_ratio}"
 
+    # Poisson arrivals: exponential inter-arrival times, capped at submission window
+    t = 0.0
+    offsets: list[int] = []
+    for _ in range(users):
+        t += rng.expovariate(lambda_rate)
+        offsets.append(min(int(t), window))
+
+    jobs: list[JobSpec] = []
     for index in range(users):
         job_type = "short" if rng.random() < short_ratio else "long"
         profile = scenario[f"{job_type}_jobs"]
@@ -34,7 +43,7 @@ def generate_jobs(scenario: dict) -> list[JobSpec]:
                 job_id=f"job_{index + 1:03d}",
                 user_id=user_id,
                 job_type=job_type,
-                submit_offset_seconds=rng.randint(0, window),
+                submit_offset_seconds=offsets[index],
                 duration_seconds=rng.randint(
                     int(profile["duration_seconds_min"]),
                     int(profile["duration_seconds_max"]),

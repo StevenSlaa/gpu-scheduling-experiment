@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config_loader import ROOT, load_hardware, load_scenario, load_strategy
+from src.errors import JobRejectedError
 from src.gpu_monitor import GpuMonitor
 from src.job_generator import JobSpec, generate_jobs
 from src.metrics_collector import QueueDepthCollector
@@ -19,6 +20,9 @@ from src.result_writer import ResultWriter, utc_now_iso
 from src.scheduler_mig import MigScheduler
 from src.scheduler_queue import QueueScheduler
 from src.scheduler_reservation import ReservationScheduler
+
+
+T_WAIT_SECONDS = 300  # 5-minute functional threshold, Section 5 of experimental design
 
 
 JOB_FIELDS = [
@@ -183,6 +187,10 @@ async def run_experiment(
             status = "failed"
             exit_code = 130
             raise
+        except JobRejectedError as exc:
+            writer.append_event("job_rejected", job_id=job.job_id, error=str(exc))
+            status = "rejected"
+            exit_code = 11
         except Exception as exc:
             writer.append_event("job_failed_to_start", job_id=job.job_id, error=str(exc))
             status = "failed"
@@ -192,7 +200,7 @@ async def run_experiment(
             runtime = max(0.0, asyncio.get_running_loop().time() - start_monotonic) if start_monotonic else 0.0
             if status == "completed":
                 state.completed_jobs += 1
-            else:
+            elif status != "rejected":
                 state.failed_jobs += 1
             if start_monotonic:
                 state.running_jobs -= 1
@@ -311,14 +319,20 @@ async def terminate_process(process: asyncio.subprocess.Process) -> None:
 
 def summarize_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
     waits = [float(row["wait_time_seconds"]) for row in rows if row["wait_time_seconds"] != ""]
+    exceeded = [w for w in waits if w > T_WAIT_SECONDS]
     return {
         "total_jobs": len(rows),
         "completed_jobs": sum(1 for row in rows if row["status"] == "completed"),
         "failed_jobs": sum(1 for row in rows if row["status"] == "failed"),
+        "rejected_jobs": sum(1 for row in rows if row["status"] == "rejected"),
         "median_wait": statistics.median(waits) if waits else None,
         "p95_wait": percentile(waits, 95) if waits else None,
         "mean_wait": statistics.mean(waits) if waits else None,
         "std_wait": statistics.pstdev(waits) if len(waits) > 1 else 0,
+        "t_wait_seconds": T_WAIT_SECONDS,
+        "t_wait_exceeded_count": len(exceeded),
+        "t_wait_exceeded_pct": round(100 * len(exceeded) / len(waits), 1) if waits else None,
+        "t_wait_adequate": statistics.median(waits) < T_WAIT_SECONDS if waits else None,
     }
 
 

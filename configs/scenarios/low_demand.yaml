@@ -2,12 +2,12 @@ scenario:
   name: low_demand
   type: low
   users: 8
-  submission_window_seconds: 300
+  submission_window_seconds: 3600  # one-hour window for genuinely sparse, irregular arrivals
+  lambda_rate: 0.02  # jobs per second (~1-2 arrivals per minute); low-rate Poisson process
   random_seed: 84
 
   job_mix:
-    short_ratio: 0.9
-    long_ratio: 0.1
+    short_ratio: 0.9  # α in the experimental design document; long_ratio = 1 - α
 
   short_jobs:
     duration_seconds_min: 30
@@ -19,4 +19,5 @@ scenario:
     duration_seconds_min: 240
     duration_seconds_max: 420
     memory_gb_min: 16
-    memory_gb_max: 32
+    # capped at MIG partition size (24 GB) so all strategies run the same jobs without rejection
+    memory_gb_max: 24

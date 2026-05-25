@@ -14,11 +14,12 @@ from src.experiment_runner import run_experiment
 MAIN_STRATEGIES = ["queue", "reservation", "mig"]
 MAIN_SCENARIOS = ["peak_16_users", "low_demand"]
 PILOT_SCENARIOS = ["peak_8_users"]
+SENSITIVITY_SCENARIOS = ["peak_8_users", "peak_16_users", "peak_32_users"]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run pilot or main experiment matrix.")
-    parser.add_argument("--matrix", choices=["pilot", "main"], default="pilot")
+    parser.add_argument("--matrix", choices=["pilot", "main", "sensitivity"], default="pilot")
     parser.add_argument("--repetitions", type=int, default=None)
     parser.add_argument("--results-root", default=ROOT / "results", type=Path)
     parser.add_argument("--metrics-interval-seconds", default=1.0, type=float)
@@ -27,8 +28,13 @@ def main() -> int:
     args = parser.parse_args()
 
     strategies = MAIN_STRATEGIES
-    scenarios = PILOT_SCENARIOS if args.matrix == "pilot" else MAIN_SCENARIOS
-    repetitions = args.repetitions if args.repetitions is not None else (1 if args.matrix == "pilot" else 3)
+    if args.matrix == "pilot":
+        scenarios = PILOT_SCENARIOS
+    elif args.matrix == "sensitivity":
+        scenarios = SENSITIVITY_SCENARIOS
+    else:
+        scenarios = MAIN_SCENARIOS
+    repetitions = args.repetitions if args.repetitions is not None else (1 if args.matrix == "pilot" else 5)
 
     for strategy in strategies:
         for scenario in scenarios:

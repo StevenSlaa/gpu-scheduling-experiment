@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
+from src.errors import JobRejectedError
 from src.job_generator import JobSpec
 
 
@@ -23,7 +24,7 @@ class MigScheduler:
     @asynccontextmanager
     async def acquire(self, job: JobSpec) -> AsyncIterator[Assignment]:
         if int(job.memory_gb) > self.partition_memory_gb:
-            raise RuntimeError(
+            raise JobRejectedError(
                 f"{job.job_id} requests {job.memory_gb} GB, exceeds MIG partition size "
                 f"{self.partition_memory_gb} GB"
             )

@@ -1,14 +1,16 @@
 strategy:
   name: mig
   type: partitioned
-  # 4 simulated 24 GB partitions per physical GPU (software-enforced, no hardware MIG)
+  # 4 hardware MIG instances per physical GPU (profile 1g.24gb = 23.62 GB each)
+  # CUDA_VISIBLE_DEVICES must list all 8 UUIDs so PyTorch sees them as cuda:0..cuda:7
+  cuda_visible_devices: "MIG-db9ae92f-0b5d-5ccb-8eaa-9931ee90dab1,MIG-de3566fc-d059-57df-bf36-d1b2a44c4f3c,MIG-d4ecf0c1-2005-52b0-8c34-db79978cfd1f,MIG-28a7a3bd-0103-59b0-8b5b-5e45c533cc24,MIG-31e2e828-3519-56d2-b47e-9de03dba98db,MIG-916d7974-7d76-56dc-902c-bc8969cdf42a,MIG-b6cc7307-ad8b-505f-ab96-32387737ec93,MIG-766c46ce-0f05-56ae-a4d1-2951149ac92c"
   devices:
     - cuda:0
-    - cuda:0
-    - cuda:0
-    - cuda:0
     - cuda:1
-    - cuda:1
-    - cuda:1
-    - cuda:1
+    - cuda:2
+    - cuda:3
+    - cuda:4
+    - cuda:5
+    - cuda:6
+    - cuda:7
   partition_memory_gb: 24

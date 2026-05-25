@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import socket
 import statistics
 import subprocess
@@ -82,6 +83,16 @@ async def run_experiment(
     strategy = load_strategy(strategy_path)
     scenario = load_scenario(scenario_path)
     hardware = load_hardware(hardware_path)
+
+    # Apply (or clear) CUDA_VISIBLE_DEVICES for strategies that require it.
+    # The MIG strategy lists 8 hardware instance UUIDs; queue/reservation leave
+    # the variable unset so cuda:0/1 resolve to the non-MIG physical GPUs.
+    cuda_visible = strategy.get("cuda_visible_devices")
+    if cuda_visible is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible)
+    elif "CUDA_VISIBLE_DEVICES" in os.environ:
+        del os.environ["CUDA_VISIBLE_DEVICES"]
+
     jobs = generate_jobs(scenario)
     scheduler = build_scheduler(strategy)
 

@@ -5,99 +5,146 @@ import csv
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config_loader import ROOT
+from src.experiment_runner import T_WAIT_SECONDS
 
 try:
+    from rich.text import Text
     from textual import on
     from textual.app import App, ComposeResult
-    from textual.containers import Horizontal, Vertical
-    from textual.widgets import Button, Checkbox, DataTable, Footer, Header, Input, Label, Log, Select, Static
-except ImportError as exc:  # pragma: no cover - user-facing fallback
+    from textual.containers import Horizontal, ScrollableContainer, Vertical
+    from textual.widgets import (
+        Button, DataTable, Footer, Header, Input, Label,
+        RichLog, Rule, Select, Static, Switch,
+    )
+except ImportError as exc:
     raise SystemExit(
-        "The terminal UI requires Textual. Install dependencies with: pip install -r requirements.txt"
+        "Terminal UI requires Textual ≥ 0.86.  Run: pip install -r requirements.txt"
     ) from exc
 
 
 RESULTS_ROOT = ROOT / "results"
 
+# ── colour tokens used in Rich markup ──────────────────────────────────────────
+_OK   = "green3"
+_WARN = "yellow3"
+_ERR  = "red3"
+_DIM  = "grey50"
+_ACC  = "dodger_blue2"
+_MAG  = "magenta"
+
+STATUS_ICONS: dict[str, tuple[str, str]] = {
+    "completed": ("✓", _OK),
+    "failed":    ("✗", _ERR),
+    "rejected":  ("⊘", _MAG),
+    "running":   ("●", _WARN),
+    "submitted": ("→", "cyan"),
+    "scheduled": ("○", _DIM),
+}
+
+EVENT_COLORS: dict[str, str] = {
+    "job_submitted":       "cyan",
+    "job_started":         _OK,
+    "job_finished":        _ACC,
+    "job_failed_to_start": _ERR,
+    "job_rejected":        _MAG,
+    "job_cancelled":       "orange3",
+}
+
 
 class ExperimentTui(App):
     CSS = """
     Screen {
-        background: #101418;
-        color: #d8dee9;
+        background: #0d1117;
+        color: #c9d1d9;
     }
 
-    #layout {
-        height: 1fr;
-    }
+    /* ── outer frame ─────────────────────────────────── */
+    #layout { height: 1fr; }
 
+    /* ── controls sidebar ────────────────────────────── */
     #controls {
-        width: 36;
-        min-width: 34;
-        padding: 1;
-        border: solid #4c566a;
-        background: #151b22;
+        width: 38;
+        min-width: 36;
+        background: #0d1117;
+        border-right: solid #21262d;
+        padding: 0 1;
     }
 
-    #main {
-        width: 1fr;
-        padding: 1;
-    }
+    #ctrl-scroll { height: 1fr; }
 
-    .section-title {
-        margin-top: 1;
-        color: #88c0d0;
+    .ctrl-title {
         text-style: bold;
+        color: #58a6ff;
+        padding: 1 0 0 0;
     }
 
-    Select, Input {
+    Select, Input { margin-bottom: 1; }
+
+    .switch-row {
+        height: 3;
         margin-bottom: 1;
+        align: left middle;
+    }
+    .switch-label {
+        padding: 0 1;
+        color: #8b949e;
     }
 
-    Button {
-        margin-top: 1;
-        width: 100%;
-    }
+    Button { width: 100%; margin-bottom: 1; }
+
+    /* ── top panels ──────────────────────────────────── */
+    #top-panels { height: 14; }
 
     #status {
-        height: 7;
-        border: solid #4c566a;
-        padding: 1;
-        margin-bottom: 1;
-        background: #151b22;
+        width: 1fr;
+        height: 1fr;
+        border: solid #21262d;
+        padding: 0 1;
+        background: #0d1117;
     }
 
     #gpu {
-        height: 5;
-        border: solid #4c566a;
-        padding: 1;
-        margin-bottom: 1;
-        background: #151b22;
+        width: 52;
+        height: 1fr;
+        border: solid #21262d;
+        padding: 0 1;
+        background: #0d1117;
     }
 
+    /* ── jobs table ──────────────────────────────────── */
     #jobs {
-        height: 12;
-        border: solid #4c566a;
-        margin-bottom: 1;
+        height: 14;
+        border: solid #21262d;
     }
 
+    DataTable > .datatable--header {
+        background: #161b22;
+        color: #8b949e;
+        text-style: bold;
+    }
+
+    DataTable > .datatable--cursor { background: #1f6feb; }
+
+    /* ── event log ───────────────────────────────────── */
     #log {
         height: 1fr;
-        border: solid #4c566a;
-        background: #0b0f14;
+        border: solid #21262d;
+        background: #0d1117;
     }
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("r", "refresh", "Refresh"),
+        ("q", "quit",      "Quit"),
+        ("r", "refresh",   "Refresh"),
         ("s", "summarize", "Summarize"),
-        ("c", "cleanup", "Cleanup"),
+        ("a", "analyse",   "Analyse"),
+        ("c", "cleanup",   "Cleanup"),
     ]
 
     def __init__(self) -> None:
@@ -111,318 +158,477 @@ class ExperimentTui(App):
         yield Header(show_clock=True)
         with Horizontal(id="layout"):
             with Vertical(id="controls"):
-                yield Label("Configuration", classes="section-title")
-                yield Select(options=self.config_options("hardware"), id="hardware", prompt="Hardware")
-                yield Select(options=self.config_options("strategies"), id="strategy", prompt="Strategy")
-                yield Select(options=self.config_options("scenarios"), id="scenario", prompt="Scenario")
-                yield Label("Run", classes="section-title")
-                yield Input(value="1", placeholder="Run index", id="run-index")
-                yield Input(value="1.0", placeholder="Time scale", id="time-scale")
-                yield Input(value="1.0", placeholder="Metrics interval seconds", id="metrics-interval")
-                yield Checkbox("Dry run", id="dry-run")
-                yield Button("Run Experiment", id="run", variant="success")
-                yield Button("Cleanup Jobs", id="cleanup", variant="warning")
-                yield Button("Validate Environment", id="validate", variant="primary")
-                yield Button("Summarize Results", id="summarize", variant="primary")
-                yield Button("Refresh Results", id="refresh")
+                with ScrollableContainer(id="ctrl-scroll"):
+                    yield Label("HARDWARE", classes="ctrl-title")
+                    yield Select(options=self.config_options("hardware"),   id="hardware", prompt="Select hardware")
+                    yield Label("STRATEGY", classes="ctrl-title")
+                    yield Select(options=self.config_options("strategies"), id="strategy", prompt="Select strategy")
+                    yield Label("SCENARIO", classes="ctrl-title")
+                    yield Select(options=self.config_options("scenarios"),  id="scenario", prompt="Select scenario")
+                    yield Rule()
+                    yield Label("RUN OPTIONS", classes="ctrl-title")
+                    yield Input(value="1",   placeholder="Run index",            id="run-index")
+                    yield Input(value="1.0", placeholder="Time scale",           id="time-scale")
+                    yield Input(value="1.0", placeholder="Metrics interval (s)", id="metrics-interval")
+                    with Horizontal(classes="switch-row"):
+                        yield Switch(value=False, id="dry-run")
+                        yield Label("Dry run", classes="switch-label")
+                    yield Rule()
+                    yield Button("▶  Run Experiment",  id="run",      variant="success")
+                    yield Button("   Validate Env",    id="validate", variant="primary")
+                    yield Button("   Summarize",       id="summarize", variant="primary")
+                    yield Button("   Analyse Results", id="analyse",  variant="primary")
+                    yield Button("   Refresh View",    id="refresh")
+                    yield Button("   Cleanup Jobs",    id="cleanup",  variant="warning")
             with Vertical(id="main"):
-                yield Static("No active run.", id="status")
-                yield Static("GPU metrics unavailable.", id="gpu")
+                with Horizontal(id="top-panels"):
+                    yield Static(id="status", markup=True)
+                    yield Static(id="gpu",    markup=True)
                 yield DataTable(id="jobs")
-                yield Log(id="log", highlight=True)
+                yield RichLog(id="log", highlight=True, markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "GPU Experiment Toolkit"
-        self.sub_title = "run, monitor, summarize"
-        self.init_tables()
-        self.set_default_selects()
-        self.set_interval(1.0, self.refresh_live_view)
-        self.query_one(Log).write_line("Ready. Choose configs and start an experiment.")
+        self.title = "GPU Scheduling Experiment"
+        self.sub_title = "schedule · monitor · analyse"
+        self._init_table()
+        self._set_defaults()
+        self.set_interval(1.0, self._tick)
+        self._show_idle()
+        self.query_one("#log", RichLog).write(
+            f"[{_DIM}]Ready.[/]  Configure a run and press [bold]▶ Run Experiment[/bold], "
+            f"or [bold]r[/bold] to load the latest result."
+        )
 
-    def init_tables(self) -> None:
-        table = self.query_one("#jobs", DataTable)
-        table.cursor_type = "row"
-        table.add_columns("Job", "User", "Type", "Mem", "Wait", "Runtime", "Status", "Device")
+    # ── table setup ─────────────────────────────────────────────────────────────
+
+    def _init_table(self) -> None:
+        t = self.query_one("#jobs", DataTable)
+        t.cursor_type = "row"
+        t.add_columns("Job", "User", "Grp", "Type", "Mem GB", "Wait s", "Runtime s", "Status", "Device")
+
+    # ── config helpers ───────────────────────────────────────────────────────────
 
     def config_options(self, kind: str) -> list[tuple[str, str]]:
         if kind == "hardware":
             paths = sorted((ROOT / "configs").glob("hardware*.yaml"))
         else:
             paths = sorted((ROOT / "configs" / kind).glob("*.yaml"))
-        return [(path.stem, path.relative_to(ROOT).as_posix()) for path in paths]
+        return [(p.stem, p.relative_to(ROOT).as_posix()) for p in paths]
 
-    def set_default_selects(self) -> None:
-        self.set_select_value("hardware", "configs/hardware_a2000_12gb.yaml", fallback="configs/hardware.yaml")
-        self.set_select_value("strategy", "configs/strategies/queue_single_gpu.yaml", fallback="configs/strategies/queue.yaml")
-        self.set_select_value("scenario", "configs/scenarios/local_a2000_smoke.yaml", fallback="configs/scenarios/peak_8_users.yaml")
+    def _set_defaults(self) -> None:
+        self._pick("hardware", "configs/hardware_a2000_12gb.yaml",      "configs/hardware.yaml")
+        self._pick("strategy", "configs/strategies/queue_single_gpu.yaml", "configs/strategies/queue.yaml")
+        self._pick("scenario", "configs/scenarios/local_a2000_smoke.yaml", "configs/scenarios/peak_8_users.yaml")
 
-    def set_select_value(self, widget_id: str, preferred: str, fallback: str) -> None:
-        select = self.query_one(f"#{widget_id}", Select)
-        config_kind = {
-            "hardware": "hardware",
-            "strategy": "strategies",
-            "scenario": "scenarios",
-        }[widget_id]
-        options = {value for _, value in self.config_options(config_kind)}
-        if preferred in options:
-            select.value = preferred
-        elif fallback in options:
-            select.value = fallback
-        elif options:
-            select.value = sorted(options)[0]
+    def _pick(self, wid: str, preferred: str, fallback: str) -> None:
+        sel = self.query_one(f"#{wid}", Select)
+        kind = {"hardware": "hardware", "strategy": "strategies", "scenario": "scenarios"}[wid]
+        opts = {v for _, v in self.config_options(kind)}
+        for choice in (preferred, fallback):
+            if choice in opts:
+                sel.value = choice
+                return
+        if opts:
+            sel.value = sorted(opts)[0]
+
+    # ── button handlers ──────────────────────────────────────────────────────────
 
     @on(Button.Pressed, "#run")
-    async def run_experiment(self) -> None:
+    async def _btn_run(self) -> None:
         if self.process and self.process.returncode is None:
-            self.query_one(Log).write_line("A run is already active.")
+            self.query_one("#log", RichLog).write(f"[{_WARN}]A run is already active.[/]")
             return
-
-        await self.cleanup_jobs(include_runner=True)
-        command = [
+        await self._do_cleanup(include_runner=True)
+        cmd = [
             sys.executable,
             str(ROOT / "scripts" / "run_single_experiment.py"),
-            "--hardware",
-            self.selected_path("hardware"),
-            "--strategy",
-            self.selected_path("strategy"),
-            "--scenario",
-            self.selected_path("scenario"),
-            "--run-index",
-            self.input_value("run-index", "1"),
-            "--time-scale",
-            self.input_value("time-scale", "1.0"),
-            "--metrics-interval-seconds",
-            self.input_value("metrics-interval", "1.0"),
+            "--hardware",                  self._path("hardware"),
+            "--strategy",                  self._path("strategy"),
+            "--scenario",                  self._path("scenario"),
+            "--run-index",                 self._val("run-index", "1"),
+            "--time-scale",                self._val("time-scale", "1.0"),
+            "--metrics-interval-seconds",  self._val("metrics-interval", "1.0"),
         ]
-        if self.query_one("#dry-run", Checkbox).value:
-            command.append("--dry-run")
-
+        if self.query_one("#dry-run", Switch).value:
+            cmd.append("--dry-run")
         self.last_event_count = 0
         self.active_result_dir = None
         self.run_started_at = time.time()
-        self.query_one(Log).clear()
-        self.query_one(Log).write_line("Starting: " + " ".join(command))
+        log = self.query_one("#log", RichLog)
+        log.clear()
+        log.write(f"[{_DIM}]$ {' '.join(cmd)}[/]")
         self.process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=ROOT,
+            *cmd, cwd=ROOT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        self.set_timer(0.2, self.find_active_result_dir)
-        asyncio.create_task(self.stream_process("stdout", self.process.stdout))
-        asyncio.create_task(self.stream_process("stderr", self.process.stderr))
-        asyncio.create_task(self.wait_for_process())
+        self.set_timer(0.3, self._find_run_dir)
+        asyncio.create_task(self._stream("stdout", self.process.stdout))
+        asyncio.create_task(self._stream("stderr", self.process.stderr))
+        asyncio.create_task(self._await_process())
 
     @on(Button.Pressed, "#validate")
-    async def validate_environment(self) -> None:
-        command = [
-            sys.executable,
-            str(ROOT / "scripts" / "validate_environment.py"),
-            "--hardware",
-            self.selected_path("hardware"),
-        ]
-        await self.run_short_command(command)
+    async def _btn_validate(self) -> None:
+        await self._short([sys.executable, str(ROOT / "scripts" / "validate_environment.py"),
+                           "--hardware", self._path("hardware")])
 
     @on(Button.Pressed, "#cleanup")
-    async def cleanup_jobs_button(self) -> None:
-        await self.cleanup_jobs(include_runner=True)
+    async def _btn_cleanup(self) -> None:
+        await self._do_cleanup(include_runner=True)
 
     @on(Button.Pressed, "#summarize")
-    async def summarize_results_button(self) -> None:
+    async def _btn_summarize(self) -> None:
         await self.action_summarize()
 
+    @on(Button.Pressed, "#analyse")
+    async def _btn_analyse(self) -> None:
+        await self.action_analyse()
+
     @on(Button.Pressed, "#refresh")
-    def refresh_results_button(self) -> None:
+    def _btn_refresh(self) -> None:
         self.action_refresh()
 
     async def action_summarize(self) -> None:
-        await self.run_short_command([sys.executable, str(ROOT / "scripts" / "summarize_results.py")])
-        self.load_latest_completed_run()
+        await self._short([sys.executable, str(ROOT / "scripts" / "summarize_results.py")])
+        self._load_latest()
+
+    async def action_analyse(self) -> None:
+        await self._short([sys.executable, str(ROOT / "scripts" / "analyse_results.py")])
 
     def action_refresh(self) -> None:
-        self.load_latest_completed_run()
-        self.refresh_live_view()
+        self._load_latest()
+        self._tick()
 
     async def action_cleanup(self) -> None:
-        await self.cleanup_jobs(include_runner=True)
+        await self._do_cleanup(include_runner=True)
 
     async def action_quit(self) -> None:
-        await self.cleanup_jobs(include_runner=True)
+        await self._do_cleanup(include_runner=True)
         self.exit()
 
-    async def cleanup_jobs(self, include_runner: bool) -> None:
+    # ── subprocess helpers ───────────────────────────────────────────────────────
+
+    async def _do_cleanup(self, include_runner: bool) -> None:
         if self.process and self.process.returncode is None:
-            self.query_one(Log).write_line("Stopping active experiment runner.")
+            self.query_one("#log", RichLog).write(f"[{_WARN}]Stopping active runner…[/]")
             self.process.terminate()
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 self.process.kill()
                 await self.process.wait()
-
-        command = [sys.executable, str(ROOT / "scripts" / "cleanup_jobs.py")]
+        cmd = [sys.executable, str(ROOT / "scripts" / "cleanup_jobs.py")]
         if include_runner:
-            command.append("--include-runner")
-        await self.run_short_command(command)
+            cmd.append("--include-runner")
+        await self._short(cmd)
 
-    async def run_short_command(self, command: list[str]) -> None:
-        self.query_one(Log).write_line("$ " + " ".join(command))
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=ROOT,
+    async def _short(self, cmd: list[str]) -> None:
+        log = self.query_one("#log", RichLog)
+        log.write(f"[{_DIM}]$ {' '.join(cmd)}[/]")
+        p = await asyncio.create_subprocess_exec(
+            *cmd, cwd=ROOT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
-        for line in stdout.decode(errors="replace").splitlines():
-            self.query_one(Log).write_line(line)
-        for line in stderr.decode(errors="replace").splitlines():
-            self.query_one(Log).write_line("[stderr] " + line)
-        self.query_one(Log).write_line(f"Exit code: {process.returncode}")
+        out, err = await p.communicate()
+        for line in out.decode(errors="replace").splitlines():
+            log.write(line)
+        for line in err.decode(errors="replace").splitlines():
+            log.write(f"[{_ERR}]{line}[/]")
+        rc_col = _OK if p.returncode == 0 else _ERR
+        log.write(f"[{rc_col}]exit {p.returncode}[/]")
 
-    async def stream_process(self, name: str, stream: asyncio.StreamReader | None) -> None:
+    async def _stream(self, name: str, stream: asyncio.StreamReader | None) -> None:
         if stream is None:
             return
         while line := await stream.readline():
             text = line.decode(errors="replace").rstrip()
-            if text:
-                self.query_one(Log).write_line(f"[{name}] {text}")
-                maybe_path = Path(text)
-                if maybe_path.exists() and maybe_path.is_dir():
-                    self.active_result_dir = maybe_path
+            if not text:
+                continue
+            markup = f"[{_ERR}]{text}[/]" if name == "stderr" else text
+            self.query_one("#log", RichLog).write(markup)
+            maybe = Path(text)
+            if maybe.exists() and maybe.is_dir():
+                self.active_result_dir = maybe
 
-    async def wait_for_process(self) -> None:
+    async def _await_process(self) -> None:
         if not self.process:
             return
-        return_code = await self.process.wait()
-        self.query_one(Log).write_line(f"Run finished with exit code {return_code}")
-        self.find_active_result_dir()
-        self.refresh_live_view()
+        rc = await self.process.wait()
+        col = _OK if rc == 0 else _ERR
+        self.query_one("#log", RichLog).write(f"[{col}]Run finished — exit {rc}[/]")
+        self._find_run_dir()
+        self._tick()
 
-    def find_active_result_dir(self) -> None:
+    def _find_run_dir(self) -> None:
         if self.active_result_dir and self.active_result_dir.exists():
             return
-        candidates = latest_result_dirs(min_mtime=self.run_started_at)
-        if candidates:
-            self.active_result_dir = candidates[0]
+        cands = _latest_dirs(min_mtime=self.run_started_at)
+        if cands:
+            self.active_result_dir = cands[0]
 
-    def refresh_live_view(self) -> None:
+    # ── live view ────────────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
         if not self.active_result_dir:
-            self.query_one("#status", Static).update("No active run.")
+            self._show_idle()
             return
-        self.update_status()
-        self.append_new_events()
-        self.update_jobs_table()
+        self._update_status()
+        self._update_events()
+        self._update_jobs_table()
 
-    def update_status(self) -> None:
-        result_dir = self.active_result_dir
-        if not result_dir:
+    def _show_idle(self) -> None:
+        self.query_one("#status", Static).update(
+            f"\n [{_DIM}]No active experiment.[/]\n\n"
+            f" Configure a run on the left and press [bold]▶ Run Experiment[/bold],\n"
+            f" or press [bold]r[/bold] to load the latest completed result."
+        )
+        self.query_one("#gpu", Static).update(f"\n [{_DIM}]GPU metrics unavailable.[/]")
+
+    def _update_status(self) -> None:
+        d = self.active_result_dir
+        if not d:
             return
-        metadata = read_json(result_dir / "metadata.json")
-        summary = read_json(result_dir / "summary.json")
-        queue_tail = last_csv_row(result_dir / "queue_depth.csv")
-        gpu_tail = last_csv_row(result_dir / "gpu_metrics.csv")
-        job_rows = read_csv(result_dir / "jobs.csv")
-        live_counts = count_job_statuses(job_rows)
-        completed_jobs = summary.get("completed_jobs", live_counts["completed"])
-        failed_jobs = summary.get("failed_jobs", live_counts["failed"])
-        total_jobs = summary.get("total_jobs", len(job_rows) or "?")
-        status_lines = [
-            f"Result: {result_dir.name}",
-            f"Strategy: {metadata.get('strategy', '?')}   Scenario: {metadata.get('scenario', '?')}   Run: {metadata.get('run_index', '?')}",
-            f"Started: {metadata.get('started_at', '?')}",
-            f"Ended: {metadata.get('ended_at') or 'running'}",
-            f"Jobs: {completed_jobs}/{total_jobs} completed   Running: {live_counts['running']}   Queued: {live_counts['queued']}   Failed: {failed_jobs}",
-            f"Wait median/p95: {summary.get('median_wait', '?')} / {summary.get('p95_wait', '?')}",
-            f"Queue depth: {queue_tail.get('queue_depth', '?')}   Running: {queue_tail.get('running_jobs', '?')}",
-        ]
-        self.query_one("#status", Static).update("\n".join(status_lines))
-        self.update_gpu_panel(gpu_tail)
+        meta  = _rjson(d / "metadata.json")
+        summ  = _rjson(d / "summary.json")
+        qrows = _rcsv(d / "queue_depth.csv")
+        jrows = _rcsv(d / "jobs.csv")
+        gpus  = _last_gpu_per_device(d / "gpu_metrics.csv")
 
-    def update_gpu_panel(self, gpu_tail: dict[str, str]) -> None:
-        util = parse_float(gpu_tail.get("gpu_util_percent"))
-        memory_used = parse_float(gpu_tail.get("memory_used_mb"))
-        memory_total = parse_float(gpu_tail.get("memory_total_mb"))
-        power = gpu_tail.get("power_watts", "?")
-        temp = gpu_tail.get("temperature_c", "?")
-        memory_percent = (memory_used / memory_total * 100) if memory_used is not None and memory_total else None
+        counts = _count(jrows)
+        total  = int(summ.get("total_jobs",  0) or 0) or len(jrows)
+        done   = int(summ.get("completed_jobs", counts["completed"]))
+        failed = int(summ.get("failed_jobs",    counts["failed"]))
+        reject = int(summ.get("rejected_jobs",  counts["rejected"]))
+
+        strategy = meta.get("strategy", "?")
+        scenario = meta.get("scenario", "?")
+        run_idx  = meta.get("run_index", "?")
+        started  = meta.get("started_at", "")
+        ended    = meta.get("ended_at")
+
+        is_live = self.process and self.process.returncode is None
+        state_tag = (f"[{_WARN}]● RUNNING[/]" if is_live
+                     else f"[{_OK}]✓ DONE[/]"  if ended
+                     else f"[{_DIM}]○ idle[/]")
+
+        prog_pct = done / total * 100 if total else 0
+        prog_bar = _bar(prog_pct, 22)
+
+        qt    = qrows[-1] if qrows else {}
+        q_dep = qt.get("queue_depth", "?")
+        q_run = qt.get("running_jobs", "?")
+
+        med_w = summ.get("median_wait")
+        p95_w = summ.get("p95_wait")
+        t_exc = summ.get("t_wait_exceeded_count")
+        t_pct = summ.get("t_wait_exceeded_pct")
+        t_adeq = summ.get("t_wait_adequate")
+
         lines = [
-            f"GPU util  {percent_bar(util)} {format_percent(util)}",
-            f"VRAM      {percent_bar(memory_percent)} {format_memory(memory_used, memory_total)}",
-            f"Power {power} W   Temp {temp} C   Device {gpu_tail.get('device', '?')}",
+            f" [{_ACC}]◆ {strategy}[/]  [dim]›[/]  [bold]{scenario}[/]  [dim]›[/]  run {run_idx}",
+            "",
+            f"  [dim]Started[/]  {_ts(started)}   [dim]Elapsed[/]  [bold]{_elapsed(started)}[/]   {state_tag}",
+            "",
+            f"  Jobs   {prog_bar}  [bold]{done}[/][dim]/{total}[/]",
+            f"         [{_OK}]✓ {done}[/]  [{_WARN}]● {counts['running']}[/]  "
+            f"[{_ERR}]✗ {failed}[/]  [{_MAG}]⊘ {reject}[/]  "
+            f"[{_DIM}]queue {q_dep}  active {q_run}[/]",
         ]
+
+        if med_w is not None:
+            mf = float(med_w)
+            pf = float(p95_w) if p95_w is not None else None
+            mc = _OK if mf < T_WAIT_SECONDS else _ERR
+            pc = _OK if (pf or 0) < T_WAIT_SECONDS else _WARN
+            pstr = f"{pf:.1f}" if pf is not None else "─"
+            wait_line = (f"  [dim]Wait[/]   median [{mc}]{mf:.1f} s[/]  "
+                         f"[dim]·[/]  p95 [{pc}]{pstr} s[/]")
+            lines += ["", wait_line]
+            if t_exc is not None:
+                ec = _OK if t_exc == 0 else _WARN if t_exc < 3 else _ERR
+                adeq = (f"[{_OK}]✓ adequate[/]" if t_adeq
+                        else f"[{_ERR}]⚠ exceeds T_wait ({T_WAIT_SECONDS} s)[/]")
+                lines.append(f"         T_wait  [{ec}]{t_exc} jobs ({t_pct:.1f}%)[/]  {adeq}")
+
+        self.query_one("#status", Static).update("\n".join(lines))
+        self._update_gpu(gpus)
+
+    def _update_gpu(self, gpus: dict[str, dict[str, str]]) -> None:
+        if not gpus:
+            self.query_one("#gpu", Static).update(f"\n [{_DIM}]No GPU data yet.[/]")
+            return
+        lines: list[str] = [f" [{_DIM}]GPU Metrics[/]"]
+        for device in sorted(gpus):
+            row   = gpus[device]
+            util  = _pf(row.get("gpu_util_percent"))
+            mem_u = _pf(row.get("memory_used_mb"))
+            mem_t = _pf(row.get("memory_total_mb"))
+            pwr   = row.get("power_watts",    "?")
+            temp  = row.get("temperature_c",  "?")
+            temp_f = _pf(temp)
+            temp_c = (_ERR if (temp_f or 0) > 80
+                      else _WARN if (temp_f or 0) > 65
+                      else _OK)
+            mem_pct = (mem_u / mem_t * 100) if mem_u and mem_t else None
+            gu = f"{mem_u/1024:.0f}" if mem_u else "?"
+            gt = f"{mem_t/1024:.0f}" if mem_t else "?"
+            lines += [
+                "",
+                f" [bold]{device}[/]  [{temp_c}]{temp}°C[/]  [{_DIM}]{pwr} W[/]",
+                f"  Util  {_bar(util, 18)}  [{_uc(util)}]{_ps(util)}[/]",
+                f"  VRAM  {_bar(mem_pct, 18)}  [{_DIM}]{gu}/{gt} GB[/]",
+            ]
         self.query_one("#gpu", Static).update("\n".join(lines))
 
-    def append_new_events(self) -> None:
+    def _update_events(self) -> None:
         if not self.active_result_dir:
             return
-        events_path = self.active_result_dir / "events.jsonl"
-        if not events_path.exists():
+        ep = self.active_result_dir / "events.jsonl"
+        if not ep.exists():
             return
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-        for line in lines[self.last_event_count :]:
+        lines = ep.read_text(encoding="utf-8").splitlines()
+        log = self.query_one("#log", RichLog)
+        for raw in lines[self.last_event_count:]:
             try:
-                event = json.loads(line)
+                ev = json.loads(raw)
             except json.JSONDecodeError:
-                self.query_one(Log).write_line(line)
+                log.write(raw)
                 continue
-            details = " ".join(f"{key}={value}" for key, value in event.items() if key not in {"time", "event"})
-            self.query_one(Log).write_line(f"{event.get('time')} {event.get('event')} {details}")
+            event = ev.get("event", "?")
+            color = EVENT_COLORS.get(event, _DIM)
+            ts    = ev.get("time", "")
+            parts = "  ".join(
+                f"[{_DIM}]{k}[/]=[bold]{v}[/bold]"
+                for k, v in ev.items() if k not in {"time", "event"}
+            )
+            log.write(f"[{_DIM}]{ts}[/]  [{color}]{event}[/]  {parts}")
         self.last_event_count = len(lines)
 
-    def update_jobs_table(self) -> None:
+    def _update_jobs_table(self) -> None:
         if not self.active_result_dir:
             return
-        jobs_path = self.active_result_dir / "jobs.csv"
-        if not jobs_path.exists():
+        jp = self.active_result_dir / "jobs.csv"
+        if not jp.exists():
             return
-        rows = read_csv(jobs_path)
-        table = self.query_one("#jobs", DataTable)
-        table.clear()
+        rows = _rcsv(jp)
+        t = self.query_one("#jobs", DataTable)
+        t.clear()
         for row in rows:
-            table.add_row(
-                row["job_id"],
-                row["user_id"],
-                row["job_type"],
-                row["requested_memory_gb"],
-                row["wait_time_seconds"],
-                row["runtime_seconds"],
-                row["status"],
-                row["assigned_device"],
+            status = row.get("status", "")
+            icon, sc = STATUS_ICONS.get(status, ("?", _DIM))
+            sc_cell = Text()
+            sc_cell.append(f"{icon} ", style=sc)
+            sc_cell.append(status,     style=sc)
+
+            wait = row.get("wait_time_seconds", "")
+            wc = Text()
+            if wait:
+                wf = float(wait)
+                wcolor = _ERR if wf > T_WAIT_SECONDS else _WARN if wf > 30 else _OK
+                wc.append(f"{wf:.1f}", style=wcolor)
+            else:
+                wc.append("─", style=_DIM)
+
+            rt = row.get("runtime_seconds", "")
+            rt_cell = Text(rt if rt else "─", style="" if rt else _DIM)
+
+            dev = row.get("assigned_device", "")
+            dev_cell = Text(dev if dev else "─", style="" if dev else _DIM)
+
+            t.add_row(
+                row.get("job_id",               ""),
+                row.get("user_id",               ""),
+                row.get("group",                 ""),
+                row.get("job_type",              ""),
+                row.get("requested_memory_gb",   ""),
+                wc,
+                rt_cell,
+                sc_cell,
+                dev_cell,
             )
 
-    def load_latest_completed_run(self) -> None:
-        candidates = latest_result_dirs()
-        if candidates:
-            self.active_result_dir = candidates[0]
+    def _load_latest(self) -> None:
+        cands = _latest_dirs()
+        if cands:
+            self.active_result_dir = cands[0]
             self.last_event_count = 0
-            self.refresh_live_view()
+            self._tick()
 
-    def selected_path(self, widget_id: str) -> str:
-        value = self.query_one(f"#{widget_id}", Select).value
-        return str(ROOT / str(value))
+    def _path(self, wid: str) -> str:
+        return str(ROOT / str(self.query_one(f"#{wid}", Select).value))
 
-    def input_value(self, widget_id: str, default: str) -> str:
-        value = self.query_one(f"#{widget_id}", Input).value.strip()
-        return value or default
+    def _val(self, wid: str, default: str) -> str:
+        v = self.query_one(f"#{wid}", Input).value.strip()
+        return v or default
 
 
-def latest_result_dirs(min_mtime: float = 0.0) -> list[Path]:
+# ── module-level helpers ─────────────────────────────────────────────────────────
+
+def _bar(value: float | None, width: int = 20) -> str:
+    if value is None:
+        return f"[{_DIM}]{'─' * width}[/]"
+    c = max(0.0, min(100.0, value))
+    f = int(width * c / 100)
+    col = _ERR if c >= 85 else _WARN if c >= 60 else _OK
+    return f"[{col}]{'█' * f}[/][{_DIM}]{'░' * (width - f)}[/]"
+
+def _uc(v: float | None) -> str:
+    return _DIM if v is None else _ERR if v >= 85 else _WARN if v >= 60 else _OK
+
+def _ps(v: float | None) -> str:
+    return "  n/a" if v is None else f"{v:5.1f}%"
+
+def _pf(value: str | float | None) -> float | None:
+    if value in (None, "", "unavailable", "?"):
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+def _ts(ts: str) -> str:
+    if not ts:
+        return "─"
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ts
+
+def _elapsed(started_at: str) -> str:
+    if not started_at:
+        return "─"
+    try:
+        start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        secs  = int((datetime.now(tz=start.tzinfo) - start).total_seconds())
+        h, r  = divmod(secs, 3600)
+        m, s  = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    except Exception:
+        return "─"
+
+def _last_gpu_per_device(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    with path.open("r", newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            out[row.get("device", "?")] = row
+    return out
+
+def _latest_dirs(min_mtime: float = 0.0) -> list[Path]:
     if not RESULTS_ROOT.exists():
         return []
     return sorted(
-        [
-            path
-            for path in RESULTS_ROOT.iterdir()
-            if path.is_dir() and (path / "metadata.json").exists() and path.stat().st_mtime >= min_mtime
-        ],
-        key=lambda path: path.stat().st_mtime,
+        [p for p in RESULTS_ROOT.iterdir()
+         if p.is_dir() and (p / "metadata.json").exists()
+         and p.stat().st_mtime >= min_mtime],
+        key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
 
-
-def read_json(path: Path) -> dict:
+def _rjson(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
@@ -430,59 +636,22 @@ def read_json(path: Path) -> dict:
     except json.JSONDecodeError:
         return {}
 
-
-def read_csv(path: Path) -> list[dict[str, str]]:
+def _rcsv(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+    with path.open("r", newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
 
-
-def last_csv_row(path: Path) -> dict[str, str]:
-    rows = read_csv(path)
-    return rows[-1] if rows else {}
-
-
-def count_job_statuses(rows: list[dict[str, str]]) -> dict[str, int]:
-    counts = {"completed": 0, "failed": 0, "running": 0, "queued": 0}
+def _count(rows: list[dict[str, str]]) -> dict[str, int]:
+    c = {"completed": 0, "failed": 0, "running": 0, "queued": 0, "rejected": 0}
     for row in rows:
-        status = row.get("status", "")
-        if status == "completed":
-            counts["completed"] += 1
-        elif status == "failed":
-            counts["failed"] += 1
-        elif status == "running":
-            counts["running"] += 1
-        elif status in {"scheduled", "submitted"}:
-            counts["queued"] += 1
-    return counts
-
-
-def parse_float(value: str | None) -> float | None:
-    if value in (None, "", "unavailable", "?"):
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-def percent_bar(value: float | None, width: int = 30) -> str:
-    if value is None:
-        return "[" + ("." * width) + "]"
-    clamped = max(0.0, min(100.0, value))
-    filled = int(round(width * clamped / 100))
-    return "[" + ("#" * filled) + ("." * (width - filled)) + "]"
-
-
-def format_percent(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:5.1f}%"
-
-
-def format_memory(used: float | None, total: float | None) -> str:
-    if used is None or total is None:
-        return "n/a"
-    return f"{used:.0f}/{total:.0f} MB"
+        s = row.get("status", "")
+        if   s == "completed":                c["completed"] += 1
+        elif s == "failed":                   c["failed"]    += 1
+        elif s == "running":                  c["running"]   += 1
+        elif s == "rejected":                 c["rejected"]  += 1
+        elif s in {"scheduled", "submitted"}: c["queued"]    += 1
+    return c
 
 
 if __name__ == "__main__":

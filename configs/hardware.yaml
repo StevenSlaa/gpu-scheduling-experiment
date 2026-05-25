@@ -8,7 +8,7 @@ hardware:
       memory_gb: 96
 
   mig:
-    enabled: true
+    enabled: false  # RTX PRO 6000 has no hardware MIG; partitioning is software-simulated
     partitions_per_gpu: 4
     partition_memory_gb: 24
     total_partitions: 8

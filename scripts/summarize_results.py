@@ -203,13 +203,23 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
         writer.writerows(rows)
 
 
+def _to_float(value) -> float | None:
+    """Return float or None if the value can't be parsed (handles '', None, '[N/A]', 'unavailable', …)."""
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def mean_number(values) -> float:
-    numbers = [float(value) for value in values if value not in ("", None, "unavailable")]
+    numbers = [v for v in (_to_float(x) for x in values) if v is not None]
     return statistics.mean(numbers) if numbers else 0.0
 
 
 def max_number(values) -> float:
-    numbers = [float(value) for value in values if value not in ("", None, "unavailable")]
+    numbers = [v for v in (_to_float(x) for x in values) if v is not None]
     return max(numbers) if numbers else 0.0
 
 
